@@ -147,7 +147,22 @@ func (a *Agent) RunAsync(ctx context.Context, message string) <-chan any {
 										ApproveToolChan: ApproveToolChannel,
 									}
 
+									// Here we launch the ToolManager function. It takes
+									// in the toolChunk, the tool function, and the chunkChan.
+									// Using the ApproveToolChan we provide through the
+									// toolChunk, it will wait for a response from the
+									// main go routine (essentially the client or user)
+									// with a reject or approval of the tool. Following
+									// that, it will then run the tool and return the
+									// result through chunkChan which we provided.
+
+									go ToolManager(toolChunk, a.Tools[*tool.Function.Name], chunkChan)
+
+									// After passing the tool into ToolManager, we can send
+									// it off to the client through chunkChan
+
 									chunkChan <- toolChunk
+
 								} else if slices.Contains(a.ToolBlacklist, *tool.Function.Name) || slices.Contains(a.ToolBlacklist, "*") {
 
 									// If the tool is in the blacklist (or the
@@ -178,6 +193,20 @@ func (a *Agent) RunAsync(ctx context.Context, message string) <-chan any {
 										ToolParams:      tool.Function.Arguments,
 										ApproveToolChan: ApproveToolChannel,
 									}
+
+									// As above, we launch the ToolManager function. It takes
+									// in the toolChunk, the tool function, and the chunkChan.
+									// Using the ApproveToolChan we provide through the
+									// toolChunk, it will wait for a response from the
+									// main go routine (essentially the client or user)
+									// with a reject or approval of the tool. Following
+									// that, it will then run the tool and return the
+									// result through chunkChan which we provided.
+
+									go ToolManager(toolChunk, a.Tools[*tool.Function.Name], chunkChan)
+
+									// After passing the tool into ToolManager, we can send
+									// it off to the client through chunkChan
 
 									chunkChan <- toolChunk
 								}
