@@ -3,10 +3,10 @@ package agent
 import (
 	"context"
 
-	"fmt"
+	"slices"
+
 	"github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
-	"slices"
 )
 
 type Agent struct {
@@ -15,7 +15,8 @@ type Agent struct {
 	Model         string
 	Instructions  string
 	Messages      []schemas.ChatMessage
-	Tools         []schemas.ChatTool
+	Tools         Tools
+	ToolSchemas   []schemas.ChatTool
 	ToolWhitelist []string
 	ToolBlacklist []string
 }
@@ -32,29 +33,9 @@ type AsyncAgentReasongingChunk struct {
 	Content string
 }
 
-// The tool chunk the streaming agent outputs.
-type AsyncAgentToolChunk struct {
-	ID              string
-	ToolName        string
-	ToolParams      string
-	ApproveToolChan chan bool
-}
-
-type AsyncAgentToolFailedChunk struct {
-	ID         string
-	ToolName   string
-	ToolParams string
-	Reason     string
-}
-
 // The error chunk a streaming agent can output.
 type AsyncAgentErrorChunk struct {
 	Content string
-}
-
-// All possible chunks an agent can output.
-type AsyncAgentChunk interface {
-	AsyncAgentTextChunk | AsyncAgentToolChunk | AsyncAgentReasongingChunk | AsyncAgentErrorChunk
 }
 
 func (a *Agent) Run(ctx context.Context, message string) (*schemas.BifrostChatResponse, *schemas.BifrostError) {
@@ -69,7 +50,7 @@ func (a *Agent) Run(ctx context.Context, message string) (*schemas.BifrostChatRe
 				},
 			}),
 		Params: &schemas.ChatParameters{
-			Tools: a.Tools,
+			Tools: a.ToolSchemas,
 		},
 	})
 
@@ -82,13 +63,17 @@ func (a *Agent) Run(ctx context.Context, message string) (*schemas.BifrostChatRe
 
 func (a *Agent) RunAsync(ctx context.Context, message string) <-chan any {
 	chunkChan := make(chan any, 100)
-	// ApproveToolChan := make(chan bool, 5)
+
+	if len(a.ToolSchemas) != len(a.Tools) {
+		panic("agent: amount of tools is unequal in ToolSchemas compared to Tools.")
+	}
 
 	// Run all agent stuff in a goroutine
 	// to make it async.
 
 	go func() {
 		for {
+
 			// Start a stream with Bifrost, using the agent settings and history.
 
 			stream, err := a.Client.ChatCompletionStreamRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostChatRequest{
@@ -101,6 +86,9 @@ func (a *Agent) RunAsync(ctx context.Context, message string) <-chan any {
 							ContentStr: schemas.Ptr(message),
 						},
 					}),
+				Params: &schemas.ChatParameters{
+					Tools: a.ToolSchemas,
+				},
 			})
 
 			if err != nil {
@@ -140,49 +128,60 @@ func (a *Agent) RunAsync(ctx context.Context, message string) <-chan any {
 
 						if len(choice.ChatStreamResponseChoice.Delta.ToolCalls) > 0 {
 							for _, tool := range choice.ChatStreamResponseChoice.Delta.ToolCalls {
-								if slices.Contains(a.ToolBlacklist, *tool.Function.Name) || slices.Contains(a.ToolBlacklist, "*") {
 
-									// If the tool is in the blacklist (or client added "*"
-									// to the blacklist, which automatically blacklists all
-									// tools), we then check the whitelist. The whitelist
-									// overrules the blacklist.
+								// If the tool is in the whitelist we skip
+								// checking whether it is in the blacklist.
+								// The whitelist overrules the blacklist.
 
-									if slices.Contains(a.ToolWhitelist, *tool.Function.Name) {
+								if slices.Contains(a.ToolWhitelist, *tool.Function.Name) {
 
-										// Create an ApproveToolChannel for each tool call,
-										// which will be used to approve that specific tool.
+									// Create an ApproveToolChannel for each tool call,
+									// which will be used to approve that specific tool.
 
-										ApproveToolChannel := make(chan bool)
+									ApproveToolChannel := make(chan bool)
 
-										toolChunk := AsyncAgentToolChunk{
-											ID:              *tool.ID,
-											ToolName:        *tool.Function.Name,
-											ToolParams:      tool.Function.Arguments,
-											ApproveToolChan: ApproveToolChannel,
-										}
-
-										chunkChan <- toolChunk
-
-									} else {
-
-										// If the tool is in the blacklist, and
-										// not in the whitelist, then we send a
-										// AsyncAgentToolFailedChunk error to the client
-										// to tell them that the tool is blacklisted.
-
-										toolBlacklistedErrorChunk := AsyncAgentToolFailedChunk{
-											ID:         *tool.ID,
-											ToolName:   *tool.Function.Name,
-											ToolParams: *&tool.Function.Arguments,
-											Reason:     "tool in blacklist.",
-										}
-
-										chunkChan <- toolBlacklistedErrorChunk
-
+									toolChunk := ToolChunk{
+										ID:              *tool.ID,
+										ToolName:        *tool.Function.Name,
+										ToolParams:      tool.Function.Arguments,
+										ApproveToolChan: ApproveToolChannel,
 									}
+
+									chunkChan <- toolChunk
+								} else if slices.Contains(a.ToolBlacklist, *tool.Function.Name) || slices.Contains(a.ToolBlacklist, "*") {
+
+									// If the tool is in the blacklist (or the
+									// user added "*" to the blacklist, which
+									// automatically adds all tools), and
+									// not in the whitelist, then we send a
+									// AsyncAgentToolFailedChunk error to the client
+									// to tell them that the tool is blacklisted.
+
+									toolBlacklistedErrorChunk := ToolFailedChunk{
+										ID:         *tool.ID,
+										ToolName:   *tool.Function.Name,
+										ToolParams: tool.Function.Arguments,
+										Reason:     "tool in blacklist.",
+									}
+
+									chunkChan <- toolBlacklistedErrorChunk
+								} else {
+
+									// If the tool isn't found in either the blacklist
+									// or the whitelist, we simply send to back to the user.
+
+									ApproveToolChannel := make(chan bool)
+
+									toolChunk := ToolChunk{
+										ID:              *tool.ID,
+										ToolName:        *tool.Function.Name,
+										ToolParams:      tool.Function.Arguments,
+										ApproveToolChan: ApproveToolChannel,
+									}
+
+									chunkChan <- toolChunk
 								}
 							}
-
 						}
 					}
 				}
